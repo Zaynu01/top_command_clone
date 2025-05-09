@@ -1,0 +1,391 @@
+#!/bin/bash
+#
+# mytop.sh - An enhanced implementation of the Linux 'top' command
+#
+# This script displays system summary information and process details in a
+# terminal-based interface that refreshes at regular intervals.
+#
+# Features:
+# - Color-coded output for better readability
+# - Multiple sorting options (CPU, Memory, PID, Time)
+# - Interactive interface
+# - Precisely aligned columns for clean display
+#
+# Usage: ./mytop.sh
+#
+# Interactive commands:
+#   q     - Quit the program
+#   Space - Refresh immediately
+#   h     - Display help
+#   c     - Sort by CPU usage (default)
+#   m     - Sort by memory usage
+#   p     - Sort by process ID
+#   t     - Sort by running time
+#
+# Author: Yahya
+#
+# COLUMN ALIGNMENT FIX: This script uses calculated field widths and precise 
+# formatting to ensure columns are perfectly aligned, regardless of color codes.
+
+# =============================================================================
+# TERMINAL CONTROL AND FORMATTING
+# =============================================================================
+# These sequences control terminal behavior and text formatting
+# ANSI escape code format: \033[<code>m
+# =============================================================================
+CLEAR="\033[2J"               # Clear screen
+CLEAR_AND_RETURN="\033[H\033[2J"  # Clear screen and return cursor to home position
+CURSOR_HOME="\033[H"          # Move cursor to home position
+BOLD="\033[1m"                # Bold text
+RESET="\033[0m"               # Reset formatting
+HIDE_CURSOR="\033[?25l"       # Hide the cursor
+SHOW_CURSOR="\033[?25h"       # Show the cursor
+
+# =============================================================================
+# COLOR CODES
+# =============================================================================
+# These color codes are used for highlighting different parts of the output
+# IMPORTANT: When using these in formatted strings, be aware they have zero 
+# display width but affect alignment calculations
+# =============================================================================
+GREEN="\033[32m"              # Green color
+YELLOW="\033[33m"             # Yellow color
+RED="\033[31m"                # Red color
+BLUE="\033[34m"               # Blue color
+CYAN="\033[36m"               # Cyan color
+MAGENTA="\033[35m"            # Magenta color
+WHITE="\033[37m"              # White color
+
+# =============================================================================
+# DEFAULT SETTINGS
+# =============================================================================
+# These settings control the default behavior of the program
+# =============================================================================
+REFRESH_INTERVAL=5            # Default refresh interval in seconds
+SORT_FIELD="-pcpu"            # Default sort by CPU usage
+SORT_DISPLAY="CPU usage"      # Display text for current sort
+
+# Column width settings for process display
+# These ensure consistent alignment across all rows
+PID_WIDTH=8
+USER_WIDTH=12
+PRI_WIDTH=5
+CPU_WIDTH=6
+MEM_WIDTH=6
+TIME_WIDTH=10
+CMD_WIDTH=40
+
+# =============================================================================
+# SIGNAL HANDLING
+# =============================================================================
+# Trap signals to ensure terminal is restored on exit
+# This prevents the terminal from remaining in an altered state if the
+# script exits unexpectedly
+# =============================================================================
+cleanup() {
+    printf "%b" "${SHOW_CURSOR}${RESET}"  # Using printf with %b to interpret escape sequences
+    stty echo                 # Restore echo
+    exit 0
+}
+trap cleanup EXIT INT TERM
+
+# =============================================================================
+# HELP DISPLAY FUNCTION
+# =============================================================================
+# Displays help information when requested by the user
+# =============================================================================
+show_help() {
+    printf "%b\n" "\n${BOLD}${CYAN}mytop - Custom System Monitor${RESET}"
+    printf "%b\n" "${YELLOW}Interactive commands:${RESET}"
+    printf "%s\n" "  q     - Quit the program"
+    printf "%s\n" "  Space - Refresh immediately"
+    printf "%s\n" "  h     - Display help"
+    printf "%s\n" "  c     - Sort by CPU usage (default)"
+    printf "%s\n" "  m     - Sort by memory usage"
+    printf "%s\n" "  p     - Sort by process ID"
+    printf "%s\n" "  t     - Sort by running time"
+    printf "%s\n" "\nPress any key to continue..."
+    read -n 1
+}
+
+# =============================================================================
+# SYSTEM INFORMATION FUNCTIONS
+# =============================================================================
+# These functions gather and format system information for display
+# =============================================================================
+
+# Function to get system uptime
+get_uptime() {
+    uptime | sed 's/.*up \([^,]*\), .*/\1/'
+}
+
+# Function to get load averages
+get_load_averages() {
+    uptime | grep -oE 'load average: [0-9.]+, [0-9.]+, [0-9.]+' | 
+    sed 's/load average: //'
+}
+
+# Function to get total processes count
+get_total_processes() {
+    ps aux | wc -l
+}
+
+# Function to get running processes count
+get_running_processes() {
+    ps r | wc -l
+}
+
+# Function to get sleeping processes count
+get_sleeping_processes() {
+    ps aux | grep -c 'S\|D'
+}
+
+# Function to get stopped processes count
+get_stopped_processes() {
+    ps aux | grep -c 'T'
+}
+
+# Function to get CPU usage
+get_cpu_usage() {
+    # Get CPU statistics from /proc/stat
+    local cpu_stats=$(cat /proc/stat | grep '^cpu ')
+    local user=$(echo $cpu_stats | awk '{print $2}')
+    local nice=$(echo $cpu_stats | awk '{print $3}')
+    local system=$(echo $cpu_stats | awk '{print $4}')
+    local idle=$(echo $cpu_stats | awk '{print $5}')
+    local iowait=$(echo $cpu_stats | awk '{print $6}')
+    local irq=$(echo $cpu_stats | awk '{print $7}')
+    local softirq=$(echo $cpu_stats | awk '{print $8}')
+    
+    # Calculate total CPU time
+    local total=$((user + nice + system + idle + iowait + irq + softirq))
+    
+    # Calculate user and system percentages
+    local user_percent=$(echo "scale=1; 100 * ($user + $nice) / $total" | bc)
+    local system_percent=$(echo "scale=1; 100 * $system / $total" | bc)
+    
+    echo "$user_percent% user, $system_percent% system"
+}
+
+# Function to get memory usage
+get_memory_usage() {
+    free -h | grep Mem | awk '{print "Total: " $2 " Used: " $3 " Free: " $4}'
+}
+
+# =============================================================================
+# COLOR CODING FUNCTIONS
+# =============================================================================
+# These functions apply color coding to values based on thresholds
+# The output is pre-formatted for consistent width regardless of color
+# =============================================================================
+
+# Function to color-code CPU usage with consistent width formatting
+color_cpu_usage() {
+    local cpu_usage="$1"
+    # Convert to a number format suitable for bc
+    local raw_value=$(echo "$cpu_usage" | sed 's/%//g')
+    
+    # Format with consistent width (always #.#%)
+    local formatted_value=$(printf "%4.1f%%" "$raw_value")
+    
+    # Apply appropriate color based on thresholds
+    if (( $(echo "$raw_value > 70" | bc -l) )); then
+        printf "%b%s%b" "${RED}" "$formatted_value" "${RESET}"
+    elif (( $(echo "$raw_value > 30" | bc -l) )); then
+        printf "%b%s%b" "${YELLOW}" "$formatted_value" "${RESET}"
+    else
+        printf "%b%s%b" "${GREEN}" "$formatted_value" "${RESET}"
+    fi
+}
+
+# Function to color-code memory usage with consistent width formatting
+color_mem_usage() {
+    local mem_usage="$1"
+    # Convert to a number format suitable for bc
+    local raw_value=$(echo "$mem_usage" | sed 's/%//g')
+    
+    # Format with consistent width (always #.#%)
+    local formatted_value=$(printf "%4.1f%%" "$raw_value")
+    
+    # Apply appropriate color based on thresholds
+    if (( $(echo "$raw_value > 50" | bc -l) )); then
+        printf "%b%s%b" "${RED}" "$formatted_value" "${RESET}"
+    elif (( $(echo "$raw_value > 20" | bc -l) )); then
+        printf "%b%s%b" "${YELLOW}" "$formatted_value" "${RESET}"
+    else
+        printf "%b%s%b" "${GREEN}" "$formatted_value" "${RESET}"
+    fi
+}
+
+# =============================================================================
+# TERMINAL SETUP
+# =============================================================================
+# Configure terminal for the application
+# =============================================================================
+setup_terminal() {
+    stty -echo          # Turn off echo
+    printf "%b" "${HIDE_CURSOR}"  # Hide cursor using printf
+    # Clear screen once at the beginning
+    printf "%b" "${CLEAR_AND_RETURN}"  # Using printf to ensure proper interpretation
+}
+
+# =============================================================================
+# DISPLAY HELPER FUNCTIONS
+# =============================================================================
+# Functions that help with drawing UI elements
+# =============================================================================
+
+# Function to draw a horizontal separator line
+draw_separator() {
+    local width=$(tput cols)
+    printf "%b" "${CYAN}"
+    printf '=%.0s' $(seq 1 $width)
+    printf "%b\n" "${RESET}"
+}
+
+# =============================================================================
+# FORMAT USER FUNCTION
+# =============================================================================
+# Formats username with color and proper width for display
+# This ensures usernames are consistently displayed with proper alignment
+# =============================================================================
+format_user() {
+    local user="$1"
+    local width="$2"
+    
+    # Apply appropriate color based on whether it's a system or user account
+    if [ "$user" = "root" ] || [ "$user" -lt 1000 ] 2>/dev/null; then
+        # System user - display in blue with fixed width
+        printf "%b%-${width}s%b" "${BLUE}" "$user" "${RESET}"
+    else
+        # Regular user - display in magenta with fixed width
+        printf "%b%-${width}s%b" "${MAGENTA}" "$user" "${RESET}"
+    fi
+}
+
+# =============================================================================
+# MAIN DISPLAY FUNCTION
+# =============================================================================
+# Primary function that handles the display loop and user interaction
+# =============================================================================
+main() {
+    setup_terminal
+    
+    while true; do
+        # Get current time
+        current_time=$(date '+%H:%M:%S')
+        
+        # Move cursor to home position instead of clearing screen each time
+        printf "%b" "${CURSOR_HOME}"
+        
+        # Get terminal width for better formatting
+        local term_width=$(tput cols)
+        
+        # Display header with system information
+        printf "%b%s%b %b%s%b\n" "${BOLD}${CYAN}" "mytop - Custom System Monitor" "${RESET}" "${YELLOW}" "(Press 'q' to quit, 'h' for help)" "${RESET}"
+        draw_separator
+        
+        # System info section - using printf consistently for proper formatting
+        printf "%b%-20s%b %s\n" "${YELLOW}" "Time:" "${RESET}" "$current_time"
+        printf "%b%-20s%b %s\n" "${YELLOW}" "Uptime:" "${RESET}" "$(get_uptime)"
+        printf "%b%-20s%b %s\n" "${YELLOW}" "Load Averages:" "${RESET}" "$(get_load_averages)"
+        
+        # Process counts
+        total_procs=$(get_total_processes)
+        running_procs=$(get_running_processes)
+        sleeping_procs=$(get_sleeping_processes)
+        stopped_procs=$(get_stopped_processes)
+        printf "%b%-20s%b %d total, %d running, %d sleeping, %d stopped\n" \
+            "${YELLOW}" "Processes:" "${RESET}" "$total_procs" "$running_procs" "$sleeping_procs" "$stopped_procs"
+        
+        # CPU and memory information
+        printf "%b%-20s%b %s\n" "${YELLOW}" "CPU:" "${RESET}" "$(get_cpu_usage)"
+        printf "%b%-20s%b %s\n" "${YELLOW}" "Memory:" "${RESET}" "$(get_memory_usage)"
+        
+        draw_separator
+        
+        # Display sort method and navigation help
+        printf "%b%s%b\n" "${CYAN}" "Sorting by: $SORT_DISPLAY" "${RESET}"
+        printf "%b%s%b\n" "${CYAN}" "Navigation: c (CPU) | m (Memory) | p (PID) | t (Time)" "${RESET}"
+        
+        draw_separator
+        
+        # Print header for process table with fixed width formatting
+        # This uses precise column widths for alignment
+        printf "%b%-${PID_WIDTH}s %-${USER_WIDTH}s %-${PRI_WIDTH}s %-${CPU_WIDTH}s %-${MEM_WIDTH}s %-${TIME_WIDTH}s %-${CMD_WIDTH}s%b\n" \
+               "${BOLD}${WHITE}" "PID" "USER" "PR" "%CPU" "%MEM" "TIME+" "COMMAND" "${RESET}"
+        
+        # Get process data using temp file to avoid process substitution issues
+        temp_file=$(mktemp)
+        ps -eo pid,user,pri,pcpu,pmem,time,comm,args --sort=$SORT_FIELD | head -n 15 | tail -n +2 > "$temp_file"
+        
+        # Read from temp file and format each line
+        while read -r pid user pri pcpu pmem time comm args; do
+            # Format user with color and fixed width
+            user_formatted=$(format_user "$user" "$USER_WIDTH")
+            
+            # Format CPU and memory values with percentage sign
+            pcpu_formatted="$pcpu%"
+            pmem_formatted="$pmem%"
+            
+            # Format values with color coding and consistent width
+            cpu_color=$(color_cpu_usage "$pcpu_formatted")
+            mem_color=$(color_mem_usage "$pmem_formatted")
+            
+            # Get command string and truncate if necessary
+            cmd=${args:0:$CMD_WIDTH}
+            
+            # Print the formatted process line with fixed width fields
+            # Using explicit field positioning for perfect alignment
+            printf "%-${PID_WIDTH}s %s %-${PRI_WIDTH}s %s %s %-${TIME_WIDTH}s %-${CMD_WIDTH}s\n" \
+                "$pid" "$user_formatted" "$pri" "$cpu_color" "$mem_color" "$time" "$cmd"
+        done < "$temp_file"
+        
+        # Remove temp file
+        rm -f "$temp_file"
+        
+        # Clear the rest of the screen to prevent artifacts
+        # Get current position and clear to end of screen
+        printf "%b" "\033[J"
+        
+        # Wait for user input with timeout
+        read -t $REFRESH_INTERVAL -n 1 input
+        
+        # Process user input
+        case "$input" in
+            q|Q)
+                cleanup
+                ;;
+            h|H)
+                show_help
+                ;;
+            " ")
+                # Space pressed, refresh immediately
+                continue
+                ;;
+            c|C)
+                # Sort by CPU usage
+                SORT_FIELD="-pcpu"
+                SORT_DISPLAY="CPU usage (press 'c')"
+                ;;
+            m|M)
+                # Sort by memory usage
+                SORT_FIELD="-pmem"
+                SORT_DISPLAY="Memory usage (press 'm')"
+                ;;
+            p|P)
+                # Sort by process ID
+                SORT_FIELD="pid"
+                SORT_DISPLAY="Process ID (press 'p')"
+                ;;
+            t|T)
+                # Sort by running time
+                SORT_FIELD="-time"
+                SORT_DISPLAY="Running time (press 't')"
+                ;;
+        esac
+    done
+}
+
+# Start the program
+main
