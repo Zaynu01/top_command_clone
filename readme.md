@@ -4,7 +4,7 @@
 
 `mytop` is an enhanced implementation of the Linux `top` command that provides a dynamic, real-time view of system resources and process activity. This terminal-based tool displays essential system metrics and process information with an intuitive, color-coded interface that refreshes at regular intervals.
 
-![alt text](image-1.png)
+![alt text](https://github.com/Zaynu01/top_command_clone/blob/main/image.png)
 
 
 ## Features
